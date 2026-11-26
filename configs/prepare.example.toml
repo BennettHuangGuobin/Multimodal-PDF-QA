@@ -1,0 +1,4 @@
+[prepare]
+dpi = 144
+pages = "1-3"
+output = "data/processed"
