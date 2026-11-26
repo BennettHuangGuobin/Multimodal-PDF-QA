@@ -2,6 +2,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from multimodal_pdf_qa.cli import main
 
 
@@ -58,3 +60,43 @@ def test_module_and_installed_entry_points():
     executable = Path(sys.executable).parent / "multimodal-pdf-qa"
     result = subprocess.run([str(executable), "--help"], capture_output=True, text=True)
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize("artifact", ["pages.jsonl", "pages"])
+def test_batch_audit_reports_orphan_document(sample_pdf, tmp_path, capsys, artifact):
+    output = tmp_path / "out"
+    assert main(["prepare", str(sample_pdf), "--output", str(output), "--pages", "1"]) == 0
+    capsys.readouterr()
+    orphan = output / "orphan"
+    orphan.mkdir()
+    if artifact == "pages":
+        (orphan / artifact).mkdir()
+    else:
+        (orphan / artifact).write_text("{}\n")
+    (output / "doc_unrelated").mkdir()
+    (output / "doc_unrelated" / "README.md").write_text("unrelated notes")
+    assert main(["audit", str(output)]) == 1
+    captured = capsys.readouterr()
+    reports = json.loads(captured.out)
+    assert len(reports) == 2
+    assert sum(r["ok"] for r in reports) == 1
+    assert "Missing manifest.json" in captured.err
+    assert main(["audit", str(orphan)]) == 1
+    assert "Missing manifest.json" in json.loads(capsys.readouterr().out)[0]["error"]
+
+
+@pytest.mark.parametrize("text", ['[prepare', '[prepare]\nunknown=1',
+                                  '[prepare]\ndpi=0', '[prepare]\npages=3'])
+def test_bad_config_is_usage_error(sample_pdf, tmp_path, capsys, text):
+    config = tmp_path / "bad.toml"
+    config.write_text(text)
+    assert main(["prepare", str(sample_pdf), "--config", str(config)]) == 2
+    assert "Error:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("pages", ["0", "99"])
+def test_invalid_pages_is_usage_error_without_output(sample_pdf, tmp_path, capsys, pages):
+    output = tmp_path / "out"
+    assert main(["prepare", str(sample_pdf), "--pages", pages, "--output", str(output)]) == 2
+    assert "Invalid pages" in capsys.readouterr().err
+    assert not output.exists()

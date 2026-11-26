@@ -7,7 +7,7 @@ import sys
 import tomllib
 
 from .audit import audit_document
-from .pdf import discover_pdfs, inspect_pdf
+from .pdf import PageRangeError, discover_pdfs, inspect_pdf
 from .prepare import prepare_pdf
 
 
@@ -49,25 +49,41 @@ def prepare_options(args: argparse.Namespace) -> dict:
             "progress": lambda message: print(message, file=sys.stderr)}
 
 
+def discover_document_dirs(source: Path) -> list[Path]:
+    """Find direct children with document artifacts, even without a manifest."""
+    def candidate(path: Path) -> bool:
+        return path.is_dir() and ((path / "manifest.json").exists()
+                                  or (path / "pages.jsonl").exists()
+                                  or (path / "pages").is_dir())
+
+    if candidate(source):
+        return [source]
+    if source.is_dir():
+        directories = sorted(path for path in source.iterdir() if candidate(path))
+        if directories:
+            return directories
+    raise ValueError(f"No document artifacts found under {source}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     results = []
     exit_code = 0
     try:
         if args.command == "audit":
-            directories = ([args.input] if (args.input / "manifest.json").is_file()
-                           else sorted(p.parent for p in args.input.glob("*/manifest.json")))
-            if not directories:
-                raise ValueError(f"No manifest.json found under {args.input}")
+            directories = discover_document_dirs(args.input)
             if args.pdf and len(directories) != 1:
                 raise ValueError("--pdf requires a single document directory")
             for directory in directories:
                 try:
+                    if not (directory / "manifest.json").is_file():
+                        raise ValueError("Missing manifest.json in candidate document directory")
                     report = audit_document(directory, args.pdf)
                     results.append(report)
                     exit_code = max(exit_code, 0 if report["ok"] else 1)
                 except Exception as exc:
-                    results.append({"document_dir": str(directory), "error": str(exc)})
+                    print(f"{directory}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                    results.append({"document_dir": str(directory), "ok": False, "error": str(exc)})
                     exit_code = 1
         else:
             pdfs = discover_pdfs(args.input)
@@ -85,10 +101,14 @@ def main(argv: list[str] | None = None) -> int:
                                         "ok": report["ok"],
                                         "successful_render_count": report["successful_render_count"]})
                         exit_code = max(exit_code, 0 if report["ok"] else 1)
+                except PageRangeError as exc:
+                    print(f"{pdf}: {exc}", file=sys.stderr)
+                    results.append({"source_pdf": str(pdf), "error": str(exc)})
+                    exit_code = 2
                 except Exception as exc:
                     print(f"{pdf}: {type(exc).__name__}: {exc}", file=sys.stderr)
                     results.append({"source_pdf": str(pdf), "error": str(exc)})
-                    exit_code = 1
+                    exit_code = max(exit_code, 1)
     except (OSError, ValueError, TypeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

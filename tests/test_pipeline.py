@@ -237,7 +237,9 @@ def test_transforms_match_visible_colored_region(sample_pdf, tmp_path):
             assert pix.pixel(*center) == (255, 0, 0)
             inverse = list(~pymupdf.Matrix(*row["mupdf_to_image_matrix"]))
             assert transform_bbox(box, inverse) == pytest.approx(list(shape))
-            pdf_box = list(shape * ~page.transformation_matrix)
+            # The fixture draws [40,90,120,180] on a 320-point-high page
+            # before cropping: independent PDF y-up coordinates, not a matrix round trip.
+            pdf_box = [40, 140, 120, 230]
             assert transform_bbox(pdf_box, row["pdf_to_mupdf_matrix"]) == pytest.approx(list(shape))
 
 

@@ -17,7 +17,7 @@ PyMuPDF 当前只负责文件元信息、页面几何信息、渲染及图像检
 
 | 状态 | 范围 |
 | --- | --- |
-| Completed | Mac CPU 本地 inspect / prepare / audit CLI，逐页 PNG、断点恢复、JSONL、manifest、完整性检查、印刷页码映射、Adapter 类型接口、自动化测试；两份真实报告各前 3 页 smoke test |
+| Completed | Mac CPU 本地 inspect / prepare / audit CLI，逐页 PNG、断点恢复、JSONL、manifest、完整性检查、印刷页码映射、Adapter 类型接口、自动化测试；两份真实报告各前 3 页 smoke test；第二轮 R1–R4 正确性与审计修复 |
 | In Progress | 更复杂页面的业务样本验收准备、OCR/布局后端的部署与评测方案；尚未全量处理报告或验证模型 |
 | Planned | MiniCPM-OCR、PP-DocLayoutV3 接入与模型推理；MLLM 线索提取、Tool Calling、外部数据库查询、证据回链 |
 
@@ -56,7 +56,16 @@ multimodal-pdf-qa prepare data/input/demo.pdf --pages 1-3 --dpi 144
 multimodal-pdf-qa audit data/processed
 ```
 
-`inspect` 输出真实页数、PDF 元信息、逐页尺寸和旋转；`prepare` 自动创建目录。进度和错误写入 stderr，JSON 结果写入 stdout。退出码：`0` 成功，`1` 文档处理失败或 audit 不通过，`2` 输入/配置错误，`130` 用户中断。目录内某个 PDF 失败不会阻止处理其他 PDF。
+`inspect` 输出真实页数、PDF 元信息、逐页尺寸和旋转；`prepare` 自动创建目录。进度和异常诊断写入 stderr，JSON 结果写入 stdout；audit 的字段问题也在 JSON 的 issues/warnings 中列出。目录内某个 PDF 失败不会阻止处理其他 PDF。
+
+| 退出码 | 约定 |
+| --- | --- |
+| `0` | 请求成功或 audit 通过；仍需查看 warnings、source_verified 和待解析状态。 |
+| `1` | 文档/产物错误：坏 PDF、不支持的页面几何、历史 JSONL 损坏、缺 manifest、渲染失败或 audit 不通过。 |
+| `2` | 参数/配置/输入选择错误：非法命令参数、DPI、TOML、页范围（含超出实际页数），没有找到 PDF/候选产物，或单文件选项用于多个文件。 |
+| `130` | 用户中断；已有成功检查点保留，可重跑。 |
+
+坏印刷页码映射文件按文档处理错误返回 1。批量任务如果同时出现 1 和 2，以 2 为最终退出码；其他合法文档仍可完成，不能把非零退出码理解为整个批次完全没有写入。
 
 ## 输入与输出
 
@@ -88,12 +97,12 @@ PNG 路径相对于其所属文档输出目录，便于整体搬移。相同 PDF
 
 ### 重复运行与恢复
 
-- 成功记录且 DPI 相同、PNG 可解码、尺寸和哈希匹配时跳过。`--force` 强制重渲染指定页。
+- 成功记录且 DPI、重新计算的页面几何、PNG 解码、尺寸和哈希均匹配时跳过。`--force` 强制重渲染指定页。旧坐标矩阵不匹配会重建该请求页，未请求页不会自动迁移。
 - 缺失、损坏、失败、未完成或 DPI 变化的指定页会重新渲染。未请求的历史页保持原样。
 - 多次页码范围取并集；`pages.jsonl` 按页码排序，每个已计划页面仅一条记录。初始待处理记录先落盘，每渲染一页原子替换索引和进度，支持中断后重跑。
 - DPI 可以逐次变化，当前请求页使用新 DPI；每条记录的 `render_dpi` 才是该页的真实值，manifest 的 `last_run.render_dpi` 仅描述最近请求。
 - 跳过的页面保留已有解析字段；重新渲染会清空该页 OCR/布局结果并重置为 `not_run`，避免坐标失效。
-- 已有 JSONL 无法解析、有重复页或不匹配的文档 ID 时拒绝覆盖。先运行 audit，备份并修复索引或使用新的输出根目录。
+- 写入前检查全部历史记录。已有 JSONL 无法解析、缺字段、类型/状态错误、路径越界、重复页或 document ID 不匹配时拒绝覆盖，即使损坏页不在当前请求范围内。已有 manifest 的基本身份、schema 和页范围也需合法。先运行 audit，备份并修复索引或使用新的输出根目录；结构合法的失败/待处理页和损坏 PNG 仍可重跑恢复。
 - 同一文档输出目录仅允许**一个写入进程**。原子替换防止半条 JSON，未实现多进程写锁或跨文件事务。磁盘写入失败会中止，之后可审计和恢复。
 
 ## 索引 Schema
@@ -116,6 +125,8 @@ PNG 路径相对于其所属文档输出目录，便于整体搬移。相同 PDF
 
 失败或未处理页面的未知几何/图像字段允许 `null`。bbox 统一为渲染 PNG 的 **像素坐标 `[x0, y0, x1, y1]`，左上角原点，x 向右、y 向下**；不是归一化坐标。详细字段及转换见 [docs/schema.md](docs/schema.md)。
 
+第二轮修正了旋转页面直接使用 `page.transformation_matrix` 时丢失 CropBox 偏移的问题，从页面框独立计算原始 PDF → 未旋转坐标，再沿用旋转/DPI 矩阵转成 PNG 坐标。当前明确拒绝非默认 UserUnit 导致的尺度变化和越界 CropBox；这些页会报告 `Unsupported page geometry`，不生成伪正确矩阵。
+
 印刷页码只能根据证据补充。单 PDF 可提供人工映射：
 
 ```bash
@@ -131,6 +142,11 @@ multimodal-pdf-qa prepare data/input/demo.pdf --pages 1-3 --printed-pages config
 - 重新打开源 PDF，核对实际页数和 SHA-256；JSONL 行数、有效对象数、重复/缺失/意外页码。
 - 字段、状态、PNG 存在性与可解码性、尺寸、DPI 比例和 SHA-256。
 - 成功、失败及不可用页面数量；哪些页面 OCR/布局仍为 `not_run`。
+- manifest.schema_version、预期页数、成功/失败/待处理计数，以及 complete 声明是否与当前产物一致。running 的合理计数滞后作为可恢复 warning，incomplete 在产物恢复后可通过并提示重跑收尾。
+
+audit 新增 `render_complete`（索引及 PNG 完整性）、`manifest_status` 和 `index_render_counts`。manifest 计数来自索引状态，audit 顶层成功数来自实际可用 PNG，二者在图像损坏后可能不同。新检查点保存 `pending_render_count`，旧 v1.0 文件可缺省此字段。详细状态/兼容规则见 Schema 文档。
+
+批量 audit 会发现包含 `manifest.json`、`pages.jsonl` 或 `pages/` 的直接子目录；候选目录缺 manifest 时明确报告错误并返回 1，不再静默遗漏。普通说明目录、只有 doc_ 名称的空目录会被忽略。范围不递归到更深层。
 
 OCR/布局 `not_run` 是正常待处理状态，不会导致 audit 失败。`success` 必须是该阶段真正完成后才能填写。audit 的 `ok` 是结构及渲染完整性结论，**不代表 OCR 或语义质量通过**。
 
@@ -152,4 +168,6 @@ pytest 在临时目录用 PyMuPDF 创建多页、旋转、裁剪等测试 PDF；
 
 2026-11-25 本地验证：**35 项测试通过**（Python 3.11.18 / PyMuPDF 1.28.2 / pytest 9.2.0）。两份真实报告实读页数分别为 107 和 128，均只处理前 3 页，144 DPI，共 6 页成功，源文件哈希与 audit 通过。视觉抽查未见明显旋转或裁剪错误；这不代表整份报告或未来 OCR 质量验收完成。PyMuPDF 底层 SWIG 输出了弃用警告，未导致测试失败。
 
-准备提交：`src/`、`tests/`、`scripts/`、`configs/*.example.*`、`docs/`、`README.md`、`pyproject.toml`、`.gitignore` 和两个 `.gitkeep`。不提交原始文档、渲染图片、处理结果、模型/缓存、环境、密钥、服务器凭据或私人配置。将来仅建立 **Private Repository**，本阶段不创建远程或 push。`.gitignore` 不是保密扫描工具，首次提交前仍应查看暂存文件清单；项目元信息和输出中可能包含本机路径与第三方报告内容。
+2026-11-26 第二轮：基线 35 项通过，修复后 **95 项测试通过、5 条 SWIG 弃用警告**。新增 60 项回归用例，详见 [迭代报告](docs/progress/iteration_02.md)。原[第一阶段审查报告](docs/progress/phase1_review_report.md)保留为历史证据，R1–R4 的当前状态以第二轮报告为准。R5–R7、Ubuntu 验证及模型推理仍为后续工作。
+
+可提交：`src/`、`tests/`、`scripts/`、`configs/*.example.*`、`docs/`、`README.md`、`pyproject.toml`、`.gitignore` 和两个 `.gitkeep`。不提交原始文档、渲染图片、处理结果、模型/缓存、环境、密钥、服务器凭据或私人配置。用户已建立 **Private Repository**，后续通过 GitHub 审阅；本轮仅本地修改，等待用户确认后上传，不自行 push，也不生成源码 ZIP。`.gitignore` 不是保密扫描工具，每次提交前仍应查看暂存文件清单；项目元信息和输出中可能包含本机路径与第三方报告内容。

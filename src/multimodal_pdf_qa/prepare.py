@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pymupdf
 
-from .audit import audit_document, check_image, record_errors, utc_now
+from .audit import audit_document, check_image, manifest_scope, record_errors, render_counts, utc_now
 from .models import PageRecord, ProcessingError
 from .pdf import open_pdf, page_geometry, select_pages
-from .storage import read_jsonl, sha256_file, write_json, write_jsonl
+from .storage import image_path, read_jsonl, sha256_file, write_json, write_jsonl
 
 
 def load_printed_pages(path: Path | None, page_count: int) -> dict[int, str | int | None]:
@@ -60,26 +60,43 @@ def prepare_pdf(
         manifest_path = directory / "manifest.json"
         index_path = directory / "pages.jsonl"
         records = {}
+        historical_pages = set()
         expected = set(selected)
         created_at = utc_now()
         if manifest_path.exists():
             previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+            historical_pages = manifest_scope(previous)
+            if previous.get("schema_version") != "1.0":
+                raise ValueError("Existing manifest has unsupported schema_version")
+            if previous.get("status") not in ("running", "incomplete", "complete"):
+                raise ValueError("Existing manifest has invalid status")
+            if not isinstance(previous.get("created_at"), str):
+                raise ValueError("Existing manifest has invalid created_at")
             if (previous.get("source_sha256") != digest
                     or previous.get("source_page_count") != doc.page_count
                     or previous.get("document_id") != document_id):
                 raise ValueError("Existing manifest does not match this source PDF")
-            expected.update(previous["expected_pages"])
+            expected.update(historical_pages)
             created_at = previous["created_at"]
         elif index_path.exists():
             raise ValueError("Index exists without manifest; restore manifest or use another output root")
         if index_path.exists():
             rows, errors, _ = read_jsonl(index_path)
-            for row in rows:
+            for position, row in enumerate(rows, 1):
                 number = row.get("pdf_page")
-                if (type(number) is not int or number not in expected or number in records
-                        or row.get("document_id") != document_id):
-                    errors.append("invalid, unexpected, duplicate page or document_id")
-                else:
+                problems = record_errors(row, document_id)
+                if type(number) is not int or number not in historical_pages or number in records:
+                    problems.append("invalid, unexpected or duplicate pdf_page")
+                try:
+                    # This validates the path without requiring the PNG to
+                    # exist: missing/corrupt images remain safely recoverable.
+                    image_path(directory, row.get("page_image_path", ""))
+                    json.dumps(row, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    problems.append(str(exc))
+                if problems:
+                    errors.append(f"record {position}, PDF page {number!r}: {'; '.join(problems)}")
+                if type(number) is int:
                     records[number] = row
             if errors:
                 raise ValueError(f"Existing index is damaged; audit it before repair: {errors}")
@@ -106,17 +123,25 @@ def prepare_pdf(
                          "colorspace": "RGB", "alpha": False, "annotations": True},
         }
         # Manifest first: if interrupted, audit will expose any missing records.
+        manifest.update(render_counts(records.values()))
         write_json(manifest_path, manifest)
         write_jsonl(index_path, records)
         for position, number in enumerate(selected, 1):
             previous = records[number]
-            reusable = (
-                not force and previous.get("render_status") == "success"
-                and previous.get("render_dpi") == dpi
-                and previous.get("page_image_path") == f"pages/page_{number:04d}.png"
-                and not record_errors(previous, document_id)
-                and check_image(directory, previous) is None
-            )
+            # Recompute metadata before reuse so phase-1 coordinate matrices
+            # cannot survive a rerun just because their PNG is intact.
+            geometry, geometry_error = {}, None
+            try:
+                page = doc.load_page(number - 1)
+                geometry = page_geometry(page, dpi)
+            except Exception as exc:
+                geometry_error = exc
+            reusable = (geometry_error is None and not force
+                        and previous.get("render_status") == "success"
+                        and previous.get("render_dpi") == dpi
+                        and previous.get("page_image_path") == f"pages/page_{number:04d}.png"
+                        and all(previous.get(key) == value for key, value in geometry.items())
+                        and check_image(directory, previous) is None)
             if reusable:
                 manifest["last_run"]["skipped"] += 1
                 action = "skipped"
@@ -127,8 +152,9 @@ def prepare_pdf(
                     printed_page=previous.get("printed_page"),
                 )
                 try:
-                    page = doc.load_page(number - 1)
-                    for key, value in page_geometry(page, dpi).items():
+                    if geometry_error is not None:
+                        raise geometry_error
+                    for key, value in geometry.items():
                         setattr(record, key, value)
                     target = directory / record.page_image_path
                     record.image_width, record.image_height = render_page(page, target, dpi)
@@ -143,6 +169,7 @@ def prepare_pdf(
                 manifest["last_run"][action] += 1
                 write_jsonl(index_path, records)
             manifest["updated_at"] = utc_now()
+            manifest.update(render_counts(records.values()))
             write_json(manifest_path, manifest)
             if progress:
                 detail = f" {records[number]['errors']}" if action == "failed" else ""
@@ -150,11 +177,11 @@ def prepare_pdf(
         manifest["status"] = "complete" if all(
             row["render_status"] == "success" for row in records.values()
         ) else "incomplete"
-        manifest["successful_render_count"] = sum(r["render_status"] == "success" for r in records.values())
-        manifest["failed_render_count"] = sum(r["render_status"] == "failed" for r in records.values())
+        manifest.update(render_counts(records.values()))
         write_json(manifest_path, manifest)
     report = audit_document(directory)
-    if not report["ok"]:
+    if not report["render_complete"]:
         manifest["status"] = "incomplete"
         write_json(manifest_path, manifest)
+        audit_document(directory)
     return directory

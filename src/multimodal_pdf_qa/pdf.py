@@ -1,10 +1,15 @@
 """PDF inspection and coordinate metadata, deliberately without text extraction."""
 
+import math
 from pathlib import Path
 
 import pymupdf
 
 from .storage import sha256_file
+
+
+class PageRangeError(ValueError):
+    """A caller-supplied page selection is invalid for the document."""
 
 
 def discover_pdfs(source: Path) -> list[Path]:
@@ -28,6 +33,23 @@ def open_pdf(path: Path) -> pymupdf.Document:
 
 
 def page_geometry(page: pymupdf.Page, dpi: int) -> dict:
+    # CropBox uses unscaled coordinates with its y-axis relative to MediaBox's
+    # top edge. Reconstruct its PDF user-space top-left without changing /Rotate.
+    # On rotated pages transformation_matrix can drop this translation.
+    media, crop = page.mediabox, page.cropbox
+    raw_crop = pymupdf.Rect(crop.x0, media.y1 - crop.y1,
+                           crop.x1, media.y1 - crop.y0)
+    if raw_crop.is_empty or not media.contains(raw_crop):
+        raise ValueError("Unsupported page geometry: CropBox must lie within MediaBox")
+    width, height = page.rect.width, page.rect.height
+    if page.rotation in (90, 270):
+        width, height = height, width
+    if not (math.isclose(width, crop.width, rel_tol=1e-6, abs_tol=1e-4)
+            and math.isclose(height, crop.height, rel_tol=1e-6, abs_tol=1e-4)):
+        # rotation_matrix itself can omit UserUnit scaling; do not emit a
+        # plausible but incorrect image-space transform for these documents.
+        raise ValueError("Unsupported page geometry: non-default UserUnit or page scaling")
+    pdf_matrix = pymupdf.Matrix(1, 0, 0, -1, -raw_crop.x0, raw_crop.y1)
     # get_pixmap renders the rotated CropBox. Coordinates from PyMuPDF APIs
     # are unrotated points; apply rotation, scale, then pixmap-origin shift.
     matrix = page.rotation_matrix * pymupdf.Matrix(dpi / 72, dpi / 72)
@@ -39,7 +61,7 @@ def page_geometry(page: pymupdf.Page, dpi: int) -> dict:
         "rotation": page.rotation,
         "media_box": list(page.mediabox),
         "crop_box": list(page.cropbox),
-        "pdf_to_mupdf_matrix": list(page.transformation_matrix),
+        "pdf_to_mupdf_matrix": list(pdf_matrix),
         "mupdf_to_image_matrix": list(matrix),
     }
 
@@ -78,5 +100,5 @@ def select_pages(spec: str | None, page_count: int) -> list[int]:
                 raise ValueError
             pages.update(range(start, stop + 1))
     except ValueError:
-        raise ValueError(f"Invalid pages {spec!r}; use 1-based ranges within 1-{page_count}") from None
+        raise PageRangeError(f"Invalid pages {spec!r}; use 1-based ranges within 1-{page_count}") from None
     return sorted(pages)

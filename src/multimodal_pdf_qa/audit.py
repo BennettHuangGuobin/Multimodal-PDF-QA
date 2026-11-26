@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+import re
 
 import pymupdf
 
@@ -46,6 +47,8 @@ def record_errors(record: dict, document_id: str) -> list[str]:
         errors.append(f"missing fields: {', '.join(sorted(missing))}")
     if record.get("document_id") != document_id:
         errors.append("document_id mismatch")
+    if type(record.get("pdf_page")) is not int or record["pdf_page"] < 1:
+        errors.append("invalid pdf_page")
     if record.get("schema_version") != "1.0":
         errors.append("unsupported schema_version")
     if record.get("bbox_coordinate_system") != "image_pixels_top_left_xyxy":
@@ -55,7 +58,7 @@ def record_errors(record: dict, document_id: str) -> list[str]:
         errors.append("invalid printed_page")
     if type(record.get("render_dpi")) is not int or record["render_dpi"] <= 0:
         errors.append("invalid render_dpi")
-    if not isinstance(record.get("page_image_path"), str):
+    if not isinstance(record.get("page_image_path"), str) or not record["page_image_path"]:
         errors.append("invalid page_image_path")
     for field in ("text_blocks", "image_regions", "relations", "errors"):
         if not isinstance(record.get(field), list):
@@ -68,7 +71,14 @@ def record_errors(record: dict, document_id: str) -> list[str]:
             value = record.get(field)
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                 errors.append(f"invalid {field}")
-        if record.get("rotation") not in (0, 90, 180, 270):
+        for field in ("image_width", "image_height"):
+            if type(record.get(field)) is not int:
+                errors.append(f"{field} must be an integer")
+        if not isinstance(record.get("page_image_sha256"), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", record["page_image_sha256"]
+        ):
+            errors.append("invalid page_image_sha256")
+        if type(record.get("rotation")) is not int or record["rotation"] not in (0, 90, 180, 270):
             errors.append("invalid rotation")
         for field, size in (("media_box", 4), ("crop_box", 4),
                             ("pdf_to_mupdf_matrix", 6), ("mupdf_to_image_matrix", 6)):
@@ -79,17 +89,70 @@ def record_errors(record: dict, document_id: str) -> list[str]:
     return errors
 
 
+def manifest_scope(manifest: dict) -> set[int]:
+    """Validate the minimum identity/scope needed to interpret an index safely."""
+    if not isinstance(manifest, dict):
+        raise ValueError("Invalid manifest: expected a JSON object")
+    for field in ("document_id", "source_pdf", "source_sha256"):
+        if not isinstance(manifest.get(field), str) or not manifest[field]:
+            raise ValueError(f"Invalid manifest: {field} must be a nonempty string")
+    expected = manifest.get("expected_pages")
+    page_count = manifest.get("source_page_count")
+    if (type(page_count) is not int or page_count < 1
+            or not isinstance(expected, list) or not expected
+            or any(type(n) is not int or not 1 <= n <= page_count for n in expected)
+            or len(set(expected)) != len(expected)):
+        raise ValueError("Invalid manifest source_page_count / expected_pages")
+    return set(expected)
+
+
+def render_counts(rows) -> dict[str, int]:
+    """Index status counts, independent of PNG usability and OCR status."""
+    rows = list(rows)
+    return {f"{label}_render_count": sum(row.get("render_status") == status for row in rows)
+            for label, status in (("successful", "success"), ("failed", "failed"),
+                                  ("pending", "not_run"))}
+
+
+def manifest_diagnostics(manifest: dict, expected: set[int], counts: dict,
+                         render_complete: bool) -> tuple[list[str], list[str]]:
+    issues, warnings = [], []
+    if manifest.get("schema_version") != "1.0":
+        issues.append(f"manifest.schema_version: unsupported value {manifest.get('schema_version')!r}")
+    status = manifest.get("status")
+    if status not in ("running", "incomplete", "complete"):
+        issues.append(f"manifest.status: invalid value {status!r}")
+    expected_count = manifest.get("expected_page_count")
+    if type(expected_count) is not int or expected_count != len(expected):
+        issues.append(f"manifest.expected_page_count: recorded={expected_count!r}, expected={len(expected)}")
+    for field, observed in counts.items():
+        # pending_render_count is additive; v1.0 files from phase 1 omit it.
+        if field == "pending_render_count" and field not in manifest:
+            continue
+        recorded = manifest.get(field)
+        if recorded is None and field not in manifest and status == "running":
+            warnings.append(f"manifest.{field}: absent in running checkpoint; index={observed}")
+        elif type(recorded) is not int or not 0 <= recorded <= len(expected):
+            issues.append(f"manifest.{field}: expected an integer in 0..{len(expected)}, got {recorded!r}")
+        elif recorded != observed:
+            message = f"manifest.{field}: recorded={recorded}, index={observed}"
+            # JSONL is committed before manifest. An interruption between the
+            # two replaces can leave a valid running checkpoint one step behind.
+            (warnings if status == "running" else issues).append(message)
+    if status == "complete" and not render_complete:
+        issues.append("manifest.status=complete contradicts incomplete/invalid rendered artifacts")
+    elif status == "running":
+        warnings.append("manifest.status=running: unfinished checkpoint; rerun prepare to finalize")
+    elif status == "incomplete" and render_complete:
+        warnings.append("manifest.status=incomplete: rendered artifacts are now complete; rerun prepare to finalize")
+    return issues, warnings
+
+
 def audit_document(document_dir: Path, pdf_path: Path | None = None) -> dict:
     document_dir = Path(document_dir).resolve()
     manifest = json.loads((document_dir / "manifest.json").read_text(encoding="utf-8"))
-    expected_list = manifest.get("expected_pages")
-    page_count = manifest.get("source_page_count")
-    if (type(page_count) is not int or page_count < 1
-            or not isinstance(expected_list, list) or not expected_list
-            or any(type(n) is not int or not 1 <= n <= page_count for n in expected_list)
-            or len(set(expected_list)) != len(expected_list)):
-        raise ValueError("Invalid manifest page count / expected_pages")
-    expected = set(expected_list)
+    expected = manifest_scope(manifest)
+    page_count = manifest["source_page_count"]
     issues, warnings = [], []
     actual_page_count = None
     source_verified = False
@@ -144,12 +207,25 @@ def audit_document(document_dir: Path, pdf_path: Path | None = None) -> dict:
             elif row.get(f"{stage}_status") == "failed":
                 failures.add(page)
     counts_ok = line_count == len(expected) and len(rows) == len(expected)
-    ok = not any((issues, jsonl_errors, invalid_page_rows, duplicates, missing, unexpected,
-                  invalid_records, image_errors, failed, pending, ocr_failed, layout_failed))
-    ok = ok and counts_ok and successful == expected
+    if not counts_ok:
+        issues.append(f"JSONL record count: lines={line_count}, records={len(rows)}, "
+                      f"expected_pages={len(expected)}, "
+                      f"manifest.expected_page_count={manifest.get('expected_page_count')!r}")
+    render_complete = not any((jsonl_errors, invalid_page_rows, duplicates, missing, unexpected,
+                               invalid_records, image_errors, failed, pending))
+    render_complete = render_complete and counts_ok and successful == expected
+    indexed_counts = render_counts(row for row in numbered if row["pdf_page"] in expected)
+    manifest_issues, manifest_warnings = manifest_diagnostics(
+        manifest, expected, indexed_counts, render_complete)
+    issues.extend(manifest_issues)
+    warnings.extend(manifest_warnings)
+    ok = render_complete and not any((issues, ocr_failed, layout_failed))
     report = {
         "schema_version": "1.0", "document_id": manifest["document_id"],
         "checked_at": utc_now(), "ok": ok,
+        "render_complete": render_complete,
+        "manifest_status": manifest.get("status"),
+        "index_render_counts": indexed_counts,
         "source_verified": source_verified,
         "actual_pdf_page_count": actual_page_count,
         "manifest_pdf_page_count": page_count,
