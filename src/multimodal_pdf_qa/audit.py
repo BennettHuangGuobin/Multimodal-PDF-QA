@@ -12,6 +12,7 @@ import pymupdf
 from .models import PageRecord
 from .pdf import open_pdf
 from .storage import image_path, read_jsonl, sha256_file, write_json
+from .validation import V11_FIELDS, validate_page_payload
 
 
 def utc_now() -> str:
@@ -42,14 +43,17 @@ def check_image(document_dir: Path, record: dict) -> str | None:
 
 def record_errors(record: dict, document_id: str) -> list[str]:
     errors = []
-    missing = set(PageRecord.__dataclass_fields__) - record.keys()
+    required = set(PageRecord.__dataclass_fields__)
+    if record.get("schema_version") == "1.0":
+        required -= V11_FIELDS
+    missing = required - record.keys()
     if missing:
         errors.append(f"missing fields: {', '.join(sorted(missing))}")
     if record.get("document_id") != document_id:
         errors.append("document_id mismatch")
     if type(record.get("pdf_page")) is not int or record["pdf_page"] < 1:
         errors.append("invalid pdf_page")
-    if record.get("schema_version") != "1.0":
+    if record.get("schema_version") not in ("1.0", "1.1"):
         errors.append("unsupported schema_version")
     if record.get("bbox_coordinate_system") != "image_pixels_top_left_xyxy":
         errors.append("invalid bbox coordinate system")
@@ -125,6 +129,21 @@ def manifest_diagnostics(manifest: dict, expected: set[int], counts: dict,
     expected_count = manifest.get("expected_page_count")
     if type(expected_count) is not int or expected_count != len(expected):
         issues.append(f"manifest.expected_page_count: recorded={expected_count!r}, expected={len(expected)}")
+    # A completed JSONL checkpoint can lead manifest by exactly ONE page.
+    # The page transitions from not_run/failed/success to success/failed.
+    fields = ("successful_render_count", "failed_render_count", "pending_render_count")
+    recorded_counts = [manifest.get(field) for field in fields]
+    if recorded_counts[2] is None and fields[2] not in manifest and all(
+        type(v) is int for v in recorded_counts[:2]
+    ):
+        recorded_counts[2] = len(expected) - sum(recorded_counts[:2])
+    valid_snapshot = all(type(v) is int and 0 <= v <= len(expected) for v in recorded_counts)
+    one_page_lag = False
+    if valid_snapshot:
+        observed_counts = [counts[field] for field in fields]
+        delta = tuple(new - old for new, old in zip(observed_counts, recorded_counts))
+        one_page_lag = (sum(recorded_counts) == sum(observed_counts) == len(expected)
+                        and delta in ((1, 0, -1), (0, 1, -1), (1, -1, 0), (-1, 1, 0)))
     for field, observed in counts.items():
         # pending_render_count is additive; v1.0 files from phase 1 omit it.
         if field == "pending_render_count" and field not in manifest:
@@ -138,7 +157,10 @@ def manifest_diagnostics(manifest: dict, expected: set[int], counts: dict,
             message = f"manifest.{field}: recorded={recorded}, index={observed}"
             # JSONL is committed before manifest. An interruption between the
             # two replaces can leave a valid running checkpoint one step behind.
-            (warnings if status == "running" else issues).append(message)
+            if status == "running" and one_page_lag:
+                warnings.append(message + " (one-page checkpoint lag)")
+            else:
+                issues.append(message + " (not a valid one-page checkpoint lag)")
     if status == "complete" and not render_complete:
         issues.append("manifest.status=complete contradicts incomplete/invalid rendered artifacts")
     elif status == "running":
@@ -181,7 +203,7 @@ def audit_document(document_dir: Path, pdf_path: Path | None = None) -> dict:
     duplicates = sorted(n for n, count in counts.items() if count > 1)
     missing = sorted(expected - counts.keys())
     unexpected = sorted(counts.keys() - expected)
-    invalid_records, image_errors = [], []
+    invalid_records, image_errors, invalid_parser_records = [], [], []
     successful, failed, pending = set(), set(), set()
     ocr_pending, layout_pending, ocr_failed, layout_failed = set(), set(), set(), set()
     for row in numbered:
@@ -189,6 +211,17 @@ def audit_document(document_dir: Path, pdf_path: Path | None = None) -> dict:
         problems = record_errors(row, manifest["document_id"])
         if problems:
             invalid_records.append({"pdf_page": page, "errors": problems})
+        try:
+            decoded = PageRecord.from_dict(row)
+            validate_page_payload(decoded)
+            if decoded.schema_version == "1.0" and (
+                decoded.ocr_status != "not_run" or decoded.layout_status != "not_run"
+                or decoded.text_blocks or decoded.page_text or decoded.image_regions
+                or decoded.layout_regions or decoded.relations or decoded.parser_provenance
+            ):
+                warnings.append(f"PDF page {page}: legacy parser data has no verified execution provenance")
+        except (ValueError, TypeError, AttributeError) as exc:
+            invalid_parser_records.append({"pdf_page": page, "error": str(exc)})
         status = row.get("render_status")
         if status == "success":
             error = check_image(document_dir, row)
@@ -219,7 +252,7 @@ def audit_document(document_dir: Path, pdf_path: Path | None = None) -> dict:
         manifest, expected, indexed_counts, render_complete)
     issues.extend(manifest_issues)
     warnings.extend(manifest_warnings)
-    ok = render_complete and not any((issues, ocr_failed, layout_failed))
+    ok = render_complete and not any((issues, invalid_parser_records, ocr_failed, layout_failed))
     report = {
         "schema_version": "1.0", "document_id": manifest["document_id"],
         "checked_at": utc_now(), "ok": ok,
@@ -239,6 +272,7 @@ def audit_document(document_dir: Path, pdf_path: Path | None = None) -> dict:
         "jsonl_record_count": len(rows), "jsonl_line_count": line_count,
         "record_count_matches": counts_ok, "jsonl_errors": jsonl_errors,
         "invalid_records": invalid_records, "image_errors": image_errors,
+        "invalid_parser_records": invalid_parser_records,
         "ocr_not_run_pages": sorted(ocr_pending), "layout_not_run_pages": sorted(layout_pending),
         "ocr_failed_pages": sorted(ocr_failed), "layout_failed_pages": sorted(layout_failed),
         "issues": issues, "warnings": warnings,

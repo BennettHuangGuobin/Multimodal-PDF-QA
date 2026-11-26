@@ -1,10 +1,11 @@
-"""Contracts only: importing this module never imports a model framework."""
+"""Backend contracts; importing this module never imports a model framework."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from .models import ImageRegion, PageRecord, ProcessingError, Relation, StageStatus, TextBlock
+from .models import (ImageRegion, LayoutRegion, PageRecord, PageText, ProcessingError,
+                     Relation, StageStatus, TextBlock)
 
 
 @dataclass
@@ -12,9 +13,13 @@ class ParserResult:
     text_blocks: list[TextBlock] = field(default_factory=list)
     image_regions: list[ImageRegion] = field(default_factory=list)
     relations: list[Relation] = field(default_factory=list)
+    layout_regions: list[LayoutRegion] = field(default_factory=list)
+    page_text: PageText | None = None
     ocr_status: StageStatus = "not_run"
     layout_status: StageStatus = "not_run"
     errors: list[ProcessingError] = field(default_factory=list)
+    ocr_empty_reason: str | None = None
+    layout_empty_reason: str | None = None
 
 
 class DocumentParserAdapter(Protocol):
@@ -26,5 +31,6 @@ class DocumentParserAdapter(Protocol):
     """
 
     name: str
+    stages: tuple[str, ...]
 
     def parse(self, image_path: Path, page: PageRecord) -> ParserResult: ...

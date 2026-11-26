@@ -244,12 +244,12 @@ def test_transforms_match_visible_colored_region(sample_pdf, tmp_path):
 
 
 def test_force_resets_downstream_status(sample_pdf, tmp_path):
+    from multimodal_pdf_qa.runner import run_parser
+    from mock_adapters import SyntheticAdapter
+
     output = tmp_path / "processed"
     directory = prepare_pdf(sample_pdf, output, pages="1")
-    row = records(directory)[0]
-    # A completed OCR stage with no detected text is a valid external result.
-    row["ocr_status"] = "success"
-    (directory / "pages.jsonl").write_text(json.dumps(row) + "\n")
+    run_parser(directory, SyntheticAdapter())
     prepare_pdf(sample_pdf, output, pages="1")
     assert records(directory)[0]["ocr_status"] == "success"
     prepare_pdf(sample_pdf, output, pages="1", force=True)
