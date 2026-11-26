@@ -1,6 +1,7 @@
 """Pure runtime validation and stage replacement; no model loading or file I/O."""
 
 from copy import deepcopy
+from collections import Counter
 from dataclasses import asdict
 import json
 import math
@@ -51,16 +52,18 @@ def stage_has_data(value, stage: str) -> bool:
 def validate_payload(value, width: int | None, height: int | None) -> None:
     """Validate types, pixel boxes and the complete page's reference graph."""
     json.dumps(asdict(value), allow_nan=False)  # also rejects non-finite extension values
-    ids, image_ids = set(), set()
+    ids, image_ids = {}, set()
     for field, region_type in (("text_blocks", TextBlock), ("image_regions", ImageRegion),
                                 ("layout_regions", LayoutRegion)):
         regions = getattr(value, field)
         require(isinstance(regions, list), f"{field} must be a list")
-        for region in regions:
+        for position, region in enumerate(regions):
             require(isinstance(region, region_type), f"{field} has an invalid item type")
             string(region.id, "region.id")
-            require(region.id not in ids, f"duplicate region ID: {region.id}")
-            ids.add(region.id)
+            location = f"{field}[{position}]"
+            require(region.id not in ids, f"duplicate region ID {region.id!r}: "
+                    f"{ids.get(region.id)} conflicts with {location}")
+            ids[region.id] = location
             if field == "image_regions":
                 image_ids.add(region.id)
             string(region.source, "source")
@@ -88,20 +91,25 @@ def validate_payload(value, width: int | None, height: int | None) -> None:
         refs = block.related_image_ids
         require(isinstance(refs, list) and all(isinstance(v, str) for v in refs),
                 "related_image_ids must be a list of strings")
-        require(len(set(refs)) == len(refs) and set(refs) <= image_ids,
-                "related_image_ids contains duplicate or missing image references")
+        duplicates = sorted(ref for ref, count in Counter(refs).items() if count > 1)
+        missing = sorted(set(refs) - image_ids)
+        require(not duplicates and not missing,
+                f"TextBlock {block.id!r}.related_image_ids: missing ImageRegion IDs={missing}, "
+                f"duplicate IDs={duplicates}")
     require(isinstance(value.relations, list), "relations must be a list")
     relation_keys = set()
-    for relation in value.relations:
+    for position, relation in enumerate(value.relations):
         require(isinstance(relation, Relation), "relations must contain Relation objects")
         for field in ("source_id", "target_id", "source", "relation_type"):
             string(getattr(relation, field), f"relation.{field}")
         require(relation.stage in ("ocr", "layout"), "relation.stage must be ocr or layout")
-        require(relation.source_id in ids and relation.target_id in ids,
-                "relation references a missing region ID")
+        context = (f"relations[{position}] stage={relation.stage!r} type={relation.relation_type!r} "
+                   f"{relation.source_id!r} -> {relation.target_id!r}")
+        missing = sorted({relation.source_id, relation.target_id} - ids.keys())
+        require(not missing, f"{context}: missing region IDs={missing}")
         confidence(relation.confidence)
         key = (relation.stage, relation.source_id, relation.target_id, relation.relation_type)
-        require(key not in relation_keys, "duplicate relation")
+        require(key not in relation_keys, f"duplicate relation: {context}")
         relation_keys.add(key)
     require(isinstance(value.errors, list), "errors must be a list")
     for error in value.errors:
@@ -207,5 +215,11 @@ def validate_parser_result(result: ParserResult, page: PageRecord, *,
                 adapter_name, page.page_image_sha256, reason)
     require(all(e.stage in stages for e in result.errors), "error stage is not owned by adapter")
     require(all(r.stage in stages for r in result.relations), "relation stage is not owned by adapter")
-    validate_page_payload(candidate)
+    try:
+        validate_page_payload(candidate)
+    except ValueError as exc:
+        raise ValueError(f"PDF page {page.pdf_page}, replacing stages {stages}: {exc}. "
+                         "Candidate rejected; previous payloads retained. For cross-stage references, "
+                         "keep referenced IDs or update their owners in a joint rerun; "
+                         "do not delete unrelated valid relations.") from exc
     return candidate

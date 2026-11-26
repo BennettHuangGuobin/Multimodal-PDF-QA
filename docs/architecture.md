@@ -41,7 +41,7 @@ audit 对源 PDF、JSONL 与 PNG 只读，会替换 audit.json。批量 CLI 将�
 
 入口为 `runner.run_parser(document_dir, adapter, *, pages=None, force=False)`。没有新 CLI 命令、任务队列或数据库；返回 document_id、parsed_pages、failed_pages、skipped_pages（含原因）和最终 audit。pages=None 表示当前 manifest 已计划页，并非整个源 PDF；显式页码仍从 1 开始且必须已 prepare。
 
-1. 检查 Adapter name/stages、manifest 身份与范围，以及**全部**历史 JSONL 的基本结构、区域、引用、来源；错误在调用和写入前拒绝。v1.0 未解析页允许渐进升级，选中的旧手工解析页缺来源则拒绝自动升级。
+1. 检查 Adapter name/stages、manifest 身份与范围，以及**全部**历史 JSONL 的基本结构、区域、引用、来源；复用 render_counts / manifest_diagnostics 核对版本、状态和汇总，不另写计数规则。索引全为渲染成功时逐页核验全部 PNG，为 complete 声明提供真实完整性依据（包括未请求页）。issue 在调用和写入前拒绝且不更新 audit；合法 running 单页滞后、旧 running 缺计数和可解释的 incomplete 仍按既有 warning 策略处理。v1.0 未解析页允许渐进升级，选中的旧手工解析页缺来源则拒绝自动升级。
 2. 对请求页，render_status 非 success 时跳过并说明原因。成功页解码实际 PNG，核对像素尺寸、DPI 比例及 SHA-256；输入损坏抛出 ValueError，要求 prepare 恢复。不会给未渲染页虚构模型失败。
 3. 同一 name、图像哈希、所负责阶段均 success 且非 force 时跳过，否则传入图像 Path 和 PageRecord 深拷贝调用 parse。name 应包含模型版本与影响结果的配置；更名触发重新解析。
 4. `validate_parser_result` 构造独立候选，只替换成功且属于该 Adapter 的阶段字段，检查完整候选的 bbox、置信度、ID、跨阶段引用、类型、状态和来源。验证函数不做文件写入，不修改输入。
@@ -51,6 +51,8 @@ audit 对源 PDF、JSONL 与 PNG 只读，会替换 audit.json。批量 CLI 将�
 JSONL 写入失败前模型可能已调用；重试会再次调用该页，不能保证 exactly-once 推理。只依赖同目录原子替换及单 writer，不提供断电持久化事务或并发锁。audit 写入失败时 JSONL 可能已经完成，重新 audit 即可，不能把整个调用当成事务回滚。有效检查点会在重试时跳过；已有失败阶段则重新执行。
 
 模型失败后保留的数组是诊断历史，使用方必须先检查阶段状态。跨阶段引用保留意味着失败布局可能仍被 OCR 数据引用；下游使用该关系前应要求相关两阶段均有效。结果缓存不是依赖跟踪系统，若后端使用另一阶段内容而该内容有变化，应显式 force 重跑；尚未实现依赖变化自动失效。
+
+跨阶段失败诊断包含 PDF 页码、替换阶段、关系索引/阶段/类型/端点以及缺失 ID；TextBlock.related_image_ids 指明所属文字块、缺失或重复图像 ID。重复区域给出两处列表位置。单阶段重跑要求保留有效的被引用 ID；需要更换 ID 时以联合 Adapter 同时更新引用所有者，或在人工核实并备份后修复候选。不会为了让校验通过而自动删除另一阶段有效关系。操作示例与适用条件见 [handoff.md](handoff.md)。
 
 ## 师兄接入后端
 

@@ -66,6 +66,12 @@ def test_cross_stage_relations_and_conflicting_replacement(prepared):
     assert after["text_blocks"] == before["text_blocks"] and after["ocr_status"] == "success"
     assert after["layout_status"] == "failed"
     assert report["audit"]["invalid_parser_records"] == []
+    message = after["errors"][0]["message"]
+    assert "PDF page 1" in message and "replacing stages ('layout',)" in message
+    assert "stage='ocr'" in message and "type='caption_of'" in message
+    assert "'ocr:text' -> 'layout:title'" in message
+    assert "missing region IDs=['layout:title']" in message and "joint rerun" in message
+    assert after["parser_provenance"] == before["parser_provenance"]
 
 
 @pytest.mark.parametrize("failure", ["bad_bbox", "exception", "wrong_return", "empty_success", "not_run"])
@@ -332,6 +338,8 @@ def test_new_layout_id_cannot_collide_with_preserved_ocr(prepared):
     assert after["layout_status"] == "failed" and after["image_regions"] == []
     assert after["text_blocks"] == before["text_blocks"]
     assert "duplicate region ID" in after["errors"][0]["message"]
+    assert "'ocr:text'" in after["errors"][0]["message"]
+    assert "text_blocks[0] conflicts with image_regions[0]" in after["errors"][0]["message"]
 
 
 def test_corrupt_unrequested_parser_page_rejected_before_any_write(sample_pdf, tmp_path):
@@ -363,3 +371,79 @@ def test_legacy_image_regions_keep_their_meaning(prepared):
     validate_page_payload(decoded)
     assert decoded.image_regions[0].id == "legacy:image" and decoded.layout_regions == []
     assert decoded.relations[0].stage == "layout"
+
+
+@pytest.mark.parametrize("keep_id", [True, False])
+def test_layout_image_update_preserves_or_rejects_ocr_links(prepared, keep_id):
+    def linked(page):
+        result = joint_result(page)
+        result.text_blocks[0].related_image_ids = ["layout:image"]
+        return result
+    run_parser(prepared, SyntheticAdapter(("ocr", "layout"), linked))
+    before = rows(prepared)[0]
+    def changed(page):
+        result = layout_result(page)
+        result.image_regions[0].bbox = (115, 40, 155, 100)
+        if not keep_id:
+            result.image_regions[0].id = "layout:new-image"
+        return result
+    report = run_parser(prepared, SyntheticAdapter(("layout",), changed, "synthetic-test/layout-v2"))
+    after = rows(prepared)[0]
+    assert after["text_blocks"] == before["text_blocks"] and after["ocr_status"] == "success"
+    if keep_id:
+        assert report["parsed_pages"] == [1] and report["audit"]["ok"]
+        assert after["image_regions"] != before["image_regions"]
+    else:
+        assert report["failed_pages"] == [1] and after["layout_status"] == "failed"
+        assert after["image_regions"] == before["image_regions"]
+        assert after["parser_provenance"] == before["parser_provenance"]
+        assert "TextBlock 'ocr:text'.related_image_ids: missing ImageRegion IDs=['layout:image']" in after["errors"][0]["message"]
+
+
+def test_joint_rerun_can_update_regions_and_their_reference_owners(prepared):
+    def linked(page):
+        result = joint_result(page)
+        result.text_blocks[0].related_image_ids = ["layout:image"]
+        result.relations.append(Relation("ocr:text", "layout:title", "describes", SOURCE, stage="ocr"))
+        return result
+    run_parser(prepared, SyntheticAdapter(("ocr", "layout"), linked))
+    def renamed(page):
+        result = linked(page)
+        for region in result.text_blocks + result.image_regions + result.layout_regions:
+            region.id += ":v2"
+        for block in result.text_blocks:
+            block.related_image_ids = [name + ":v2" for name in block.related_image_ids]
+        for relation in result.relations:
+            relation.source_id += ":v2"
+            relation.target_id += ":v2"
+        return result
+    report = run_parser(prepared, SyntheticAdapter(("ocr", "layout"), renamed, "synthetic-test/joint-v2"))
+    record = rows(prepared)[0]
+    assert report["parsed_pages"] == [1] and report["audit"]["ok"]
+    assert record["ocr_status"] == record["layout_status"] == "success"
+    assert all(region["id"].endswith(":v2") for name in ("text_blocks", "image_regions", "layout_regions")
+               for region in record[name])
+    assert record["text_blocks"][0]["related_image_ids"] == ["layout:image:v2"]
+    assert len(record["relations"]) == 2 and record["errors"] == []
+
+
+def test_ocr_id_change_cannot_break_preserved_layout_relation(prepared):
+    def linked(page):
+        result = joint_result(page)
+        result.relations.append(Relation("layout:title", "ocr:text", "contains", SOURCE))
+        return result
+    run_parser(prepared, SyntheticAdapter(("ocr", "layout"), linked))
+    before = rows(prepared)[0]
+    def renamed_ocr(page):
+        result = ocr_result(page)
+        result.text_blocks[0].id = "ocr:replacement"
+        return result
+    report = run_parser(prepared, SyntheticAdapter(factory=renamed_ocr, name="synthetic-test/ocr-v2"))
+    after = rows(prepared)[0]
+    assert report["failed_pages"] == [1] and after["ocr_status"] == "failed"
+    assert after["layout_status"] == "success"
+    for field in ("text_blocks", "layout_regions", "image_regions", "relations", "parser_provenance"):
+        assert after[field] == before[field]
+    assert "stage='layout'" in after["errors"][0]["message"]
+    assert "'layout:title' -> 'ocr:text'" in after["errors"][0]["message"]
+    assert "missing region IDs=['ocr:text']" in after["errors"][0]["message"]

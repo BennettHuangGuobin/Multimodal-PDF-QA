@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 
 from .adapters import DocumentParserAdapter
-from .audit import audit_document, check_image, manifest_scope, record_errors
+from .audit import (audit_document, check_image, manifest_diagnostics, manifest_scope,
+                    record_errors, render_counts)
 from .models import PageRecord, ProcessingError
 from .pdf import select_pages
 from .storage import image_path, read_jsonl, write_jsonl
@@ -27,8 +28,6 @@ def run_parser(document_dir: Path, adapter: DocumentParserAdapter, *,
     directory = Path(document_dir).resolve()
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     expected = manifest_scope(manifest)
-    if manifest.get("schema_version") != "1.0":
-        raise ValueError("Unsupported manifest schema_version")
     selected = sorted(expected) if pages is None else select_pages(pages, manifest["source_page_count"])
     if not set(selected) <= expected:
         raise ValueError("Requested pages have not been prepared")
@@ -51,6 +50,23 @@ def run_parser(document_dir: Path, adapter: DocumentParserAdapter, *,
             records[number], decoded[number] = row, page
     if errors or set(records) != expected:
         raise ValueError(f"Invalid page index; repair with prepare before parsing: {errors}")
+    # Reuse audit's exact count/status rules without writing an audit report.
+    # A complete declaration also covers unrequested images. Decode sequentially;
+    # retain diagnostics, never a collection of PNGs in memory.
+    counts = render_counts(records.values())
+    render_complete = counts["successful_render_count"] == len(expected)
+    image_errors = []
+    if render_complete:
+        for number, row in records.items():
+            error = check_image(directory, row)
+            if error:
+                image_errors.append(f"PDF page {number}: {error}")
+        render_complete = not image_errors
+    issues, _ = manifest_diagnostics(manifest, expected, counts, render_complete)
+    if issues:
+        if image_errors:
+            issues.append(f"unusable parser input: {'; '.join(image_errors)}")
+        raise ValueError(f"Invalid manifest; rerun prepare before parsing: {'; '.join(issues)}")
     # Existing real v1.0 outputs contain not_run/empty payloads and migrate
     # losslessly. Hand-populated legacy results have no trustworthy provenance:
     # do not silently bind them to a PNG or reinterpret images as generic layout.

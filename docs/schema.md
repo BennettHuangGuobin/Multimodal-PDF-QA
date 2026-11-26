@@ -94,6 +94,8 @@ OCR 拥有 text_blocks/page_text，Layout 拥有 image_regions/layout_regions。
 
 替换后检查整页引用，跨阶段 ID 碰撞或悬空引用使本次结果失败。若另一阶段依赖即将移除的 ID，需要维持稳定 ID、先更新依赖，或用联合 Adapter 一并替换；不能静默删除另一阶段的关系。联合 Adapter 可明确返回某一阶段 failed、另一阶段 success，此时只提交通过验证的成功部分及失败状态；整个结果类型/引用等非法时，本次声明的全部阶段记为 failed。
 
+第四轮增强了诊断：重复 ID 指出两个区域列表位置；悬空关系指出索引、stage、类型和 source_id→target_id；related_image_ids 指出文字块 ID 与缺失/重复的图像 ID。错误带页码和替换阶段，旧内容保护策略不变。维持 ID 仍需确认语义区域一致，不能为通过验证复用错误 ID；联合重跑须在同一次 ParserResult 中提交所有关联更改。人工修复的备份、校验与来源要求见 [handoff.md](handoff.md)。
+
 `parser_provenance` 保存每阶段最后接受的 Adapter 标识（版本/配置应包含在 name）和输入 PNG SHA-256；empty_reason 只允许在无内容时填写。阶段失败后保留旧 provenance，失败调用身份在 errors.message 中。默认仅跳过同 Adapter 标识、同 PNG 哈希且状态 success 的阶段组合；force 重新调用。重渲染创建新 PageRecord，清空全部解析数据和来源并设为 not_run；中断期间 PNG 与旧索引哈希不符时 audit/Runner 拒绝把旧结果当作有效结果。
 
 消费者应同时检查 render_status、所用阶段状态及 audit；引用跨阶段结果时还需检查依赖阶段。保留的失败阶段数据、legacy warning 下的数据不可当作已验证识别成果。来源记录与空结果原因是后端契约，不能从结构检查独立证明模型真的执行或识别准确。
@@ -121,6 +123,8 @@ manifest 中 `expected_pages` 是历次请求范围并集，`source_page_count` 
 未知状态、未知 schema、非整数/负数/超过计划页数的计数是 issue。complete/incomplete 的计数与索引不一致也是 issue；只有 running 的合理检查点差异允许 warning。`last_run` 是运行历史，audit 无法仅凭索引独立重建 rendered 与 skipped 的区别，当前不把它当成产物数量的权威值。
 
 第三轮限定 running 的计数宽容边界：按 `(success, failed, pending)`，`index - manifest` 只能是 `(1,0,-1)`、`(0,1,-1)`、`(1,-1,0)`、`(-1,1,0)`，分别对应一页 pending→success/failed、failed→success、success→failed。两侧计数必须非负且合计等于 expected_page_count。两页以上差异、不守恒或回退为 pending 均是 issue；差异为零无需计数 warning。旧 manifest 缺 pending 时可由总页数减去 success/failed 推算；不能从缺失计数推断任意大差异合法。首次/扩展计划时先写 manifest 后写索引，中断留下的缺页仍按缺页报告，可通过 prepare 恢复。
+
+第四轮 Runner 复用上述诊断作写前预检，issue 在调用 Adapter 和写 JSONL 前拒绝，不调用会写文件的 audit_document 作为预检。合法 warning 不被升级为不可恢复错误；Runner 不修改 manifest，运行结束的 audit 仍记录 warning。缺页/坏索引先 prepare 恢复；字段内容被篡改且不能由 prepare 自动修复时，先备份并根据原始资料修复，不能只改计数掩盖实际问题。
 
 audit 将源 PDF 实际页数、manifest 页数、预期页数、JSONL 行数/有效记录数、成功/失败计数分别输出。`failed_render_count` 只统计显式 `failed`；PNG 损坏记录在 `image_errors`，所有不能使用的计划页汇总为 `unusable_render_pages`。缺失记录并不伪装为运行失败；`missing_pages`、`duplicate_pages`、`pending_render_pages` 分别记录。
 
