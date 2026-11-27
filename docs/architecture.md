@@ -1,6 +1,6 @@
 # 本地 PDF 准备与 Adapter 数据闭环
 
-当前模块均运行在 Mac CPU，本地文件系统是唯一持久化介质。
+核心工程运行在 Mac CPU，本地文件系统是唯一持久化介质；第五轮真实 OCR 通过 loopback HTTP 交给外部 Ollama 计算，未测量其加速器占用。
 
 ```text
 CLI (argparse + tomllib)
@@ -13,13 +13,14 @@ Python API: runner.run_parser(document_dir, adapter, pages=..., force=False)
 
 models: dataclasses 共用结构
 storage: SHA-256、JSON/JSONL 原子替换、安全相对路径
-adapters: DocumentParserAdapter Protocol + ParserResult（尚无真实模型后端）
+adapters: DocumentParserAdapter Protocol + ParserResult
+backends.ollama_ocr: local /api/generate → PageText + private timing evidence
 validation: bbox / types / IDs / references / stage ownership / provenance
 ```
 
 ## 状态与恢复
 
-每页独立记录三个阶段状态，`not_run → success | failed`。首次计划页以 `not_run` 保存；渲染失败保留真实错误，并继续后续页。prepare 本身不运行 OCR/布局；第三轮 Runner 仅调用调用者显式提供的 Adapter。当前只有 tests 下的合成实现，无真实模型推理。
+每页独立记录三个阶段状态，`not_run → success | failed`。首次计划页以 `not_run` 保存；渲染失败保留真实错误，并继续后续页。prepare 本身不运行 OCR/布局；Runner 仅调用显式提供的 Adapter。第五轮已有真实 Ollama OCR，pytest 仍全部使用合成/Mock，不自动推理。
 
 在任何已有产物写入前，prepare 校验 manifest 身份、版本与计划范围，并检查**全部历史记录**的必需字段、状态、基本类型、路径与 JSON 可序列化性。未请求页缺字段也会明确报错，拒绝时不改写 manifest/JSONL/PNG。Parser Runner 在此基础上还对全部历史页面解码并验证解析字段、区域引用和来源；audit 复用同一深层结构校验。该校验不评判模型识别的语义准确性。
 
@@ -39,7 +40,7 @@ audit 对源 PDF、JSONL 与 PNG 只读，会替换 audit.json。批量 CLI 将�
 
 ## Adapter Runner 流程
 
-入口为 `runner.run_parser(document_dir, adapter, *, pages=None, force=False)`。没有新 CLI 命令、任务队列或数据库；返回 document_id、parsed_pages、failed_pages、skipped_pages（含原因）和最终 audit。pages=None 表示当前 manifest 已计划页，并非整个源 PDF；显式页码仍从 1 开始且必须已 prepare。
+入口为 `runner.run_parser(document_dir, adapter, *, pages=None, force=False)`。核心 CLI 子命令不变；第五轮新增 scripts/run_ollama_ocr.py 薄调用脚本，要求显式页码，无任务队列或数据库。Runner 返回 document_id、parsed_pages、failed_pages、skipped_pages（含原因）和最终 audit。pages=None 表示当前 manifest 已计划页，并非整个源 PDF；显式页码仍从 1 开始且必须已 prepare。
 
 1. 检查 Adapter name/stages、manifest 身份与范围，以及**全部**历史 JSONL 的基本结构、区域、引用、来源；复用 render_counts / manifest_diagnostics 核对版本、状态和汇总，不另写计数规则。索引全为渲染成功时逐页核验全部 PNG，为 complete 声明提供真实完整性依据（包括未请求页）。issue 在调用和写入前拒绝且不更新 audit；合法 running 单页滞后、旧 running 缺计数和可解释的 incomplete 仍按既有 warning 策略处理。v1.0 未解析页允许渐进升级，选中的旧手工解析页缺来源则拒绝自动升级。
 2. 对请求页，render_status 非 success 时跳过并说明原因。成功页解码实际 PNG，核对像素尺寸、DPI 比例及 SHA-256；输入损坏抛出 ValueError，要求 prepare 恢复。不会给未渲染页虚构模型失败。
@@ -68,7 +69,7 @@ OCR-only 的输出必须 layout_status=not_run；它表示“不更新布局”�
 
 接手建议按以下顺序实施：
 
-1. 在独立推理环境验证具体模型版本、硬件适配与最小输入，模型依赖放在后端层，Mac 核心依赖维持轻量。当前尚无真实 MiniCPM-OCR / PP-DocLayoutV3 类。
+1. 在独立推理环境验证具体模型版本、硬件适配与最小输入，模型依赖放在后端层，Mac 核心依赖维持轻量。已有 OllamaOCRAdapter 将指定 MiniCPM-OCR 输出映射到 PageText；PP-DocLayoutV3 尚无实现。
 2. MiniCPM-OCR 有可信文字 bbox 时映射 TextBlock，无可靠 bbox 时返回 PageText；不能制造整页框。PP-DocLayoutV3 的 title/paragraph/table/figure 等输出映射 LayoutRegion，实际图像证据才考虑 ImageRegion。所有输出转成 Python 内置类型。
 3. 后端负责将缩放、letterbox、裁剪后的 bbox 反变换至输入 PNG 像素空间，不自动截断越界框掩盖错误。保留真实来源、可选置信度、阅读顺序；未知关系为空，不能按邻近位置假装模型已经判定。
 4. 为后端添加独立转换测试，再用 run_parser 在少量已授权代表页上验证，查看 audit 的结构诊断，人工核对文本、布局及坐标。仅空数组不代表成功；确认真实执行后未发现目标时才填明确的 *_empty_reason。

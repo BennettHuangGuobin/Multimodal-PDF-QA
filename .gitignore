@@ -40,6 +40,8 @@ cache/
 *.safetensors
 *.onnx
 *.bin
+*.gguf
+.ollama/
 
 # Local environments / development tools.
 .venv/

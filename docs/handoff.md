@@ -1,6 +1,6 @@
 # 工程交接：从 Clone 到接入真实后端
 
-更新：2026-11-27。第三轮已提交并审阅的基线为 `81356dd`；第四轮改动目前仅在本地，详见 [iteration_04.md](progress/iteration_04.md)。
+更新：2026-11-27。第四轮已提交基线为 `3c51559`；第五轮新增 Ollama OCR 和三页真实实验，目前未 commit/push，详见 [iteration_05.md](progress/iteration_05.md)。
 
 ## 1. 项目目标与边界
 
@@ -11,7 +11,7 @@ PDF → 页面渲染 → OCR / 文档 MLLM → 结构化图文索引
     → 核心 MLLM 提取图文线索 → Tool Calling → 外部数据库检索 → 证据回链
 ```
 
-采用 OCR-first。PyMuPDF 用于元信息、渲染和产物校验，不把 PDF 原生文字抽取当作 OCR 替代。当前完成了渲染和 Adapter 工程数据闭环；**真实 OCR/MLLM、布局模型、Tool Calling 和数据库均未接入**。
+采用 OCR-first。PyMuPDF 用于元信息、渲染和产物校验，不把 PDF 原生文字抽取当作 OCR 替代。当前完成了渲染、Adapter 数据闭环及通过本机 Ollama 的真实 MiniCPM-OCR 文字识别；**布局模型、核心 MLLM 图文线索理解、Tool Calling 和数据库仍未接入**。
 
 ## 2. 已完成能力与源码入口
 
@@ -27,8 +27,9 @@ PDF → 页面渲染 → OCR / 文档 MLLM → 结构化图文索引
 | `storage.py` | read_jsonl、write_jsonl、write_json、sha256_file：原子替换与哈希 | Runner 写入失败及中断测试 |
 | `audit.py` | audit_document、manifest_diagnostics：源文件、产物、汇总一致性与解析结构检查 | test_audit_manifest、test_recovery |
 | `cli.py` | inspect / prepare / audit；JSON stdout、进度/错误 stderr | test_cli |
+| `backends/ollama_ocr.py` | OllamaOCRAdapter：本地 HTTP、模型/配置身份、PageText、请求/超时/空结果分类、API 指标 | test_ollama_ocr + 三页真实实验 |
 
-本轮本地完整测试 **222 passed，5 条 SWIG 弃用警告**；前三轮 195 项用例保留通过。详细执行环境、隔离环境与 CLI 证据见本轮报告。测试里的 SyntheticAdapter 完全是人工定义数据，只用于临时合成 PDF，不是模型识别成果。
+当前完整测试 **265 passed，5 条 SWIG 弃用警告**，其中 43 项为第五轮新增 Mock HTTP 测试。第四轮隔离环境证据保留在其报告；第五轮真实模型实验单独记录。所有 pytest 均使用合成数据和 Mock，不默认启动真实模型或读取业务报告。
 
 `render_status=success` 仅表示页面图像已生成。manifest.complete 只描述渲染准备状态；audit.render_complete 也不等于 OCR 完成。OCR/Layout not_run 是正常待处理状态；audit.ok 是结构、状态与完整性检查通过，**不证明文字、类别或语义正确**。
 
@@ -47,11 +48,11 @@ python -m pip check
 python -m pytest -q
 ```
 
-确认仓库已包含第四轮提交，能找到本文件与 constraints/verified.txt；`81356dd` 是审阅基线，尚不包含这两个新增文件。Python 3.12+ 可替换解释器命令，但本轮未实测这些版本。Ubuntu 若缺 venv 模块，先由环境维护者安装对应 Python 的 venv 支持；不需要 CUDA。
+基础交接文件已在 `3c51559` 中。使用真实 Ollama 后端前，需用户确认上传第五轮并更新仓库。Python 3.12+ 可替换解释器命令，但未实测这些版本。Ubuntu 若缺 venv 模块，先由环境维护者安装对应 Python 的 venv 支持；核心工程不需要 CUDA。
 
 [constraints/verified.txt](../constraints/verified.txt) 固定已验证组合：PyMuPDF 1.28.2、pytest 9.2.0、iniconfig 2.3.1、packaging 26.4、pluggy 1.7.0、Pygments 2.21.0、构建后端 setuptools 84.2.1。先安装固定 setuptools，再以 `--no-build-isolation` 构建本项目，避免隔离构建另取未约束版本。`pyproject.toml` 保留通用安装范围；范围内每个版本都通过测试并不是本项目的承诺。
 
-这是版本约束集合，不是含平台 wheel/哈希的完整锁文件；没有锁定 OS、解释器或 pip。安装器按当前平台选包，不应拷贝 Mac 的 .venv、Python 可执行文件或 wheel 到服务器。Mac ARM64 的隔离环境已验证；**Ubuntu x86_64 / GPU 未验证**。当前执行环境首次 pip 获取固定版本未成功，改用本机已有 uv 缓存离线安装后完成 pip 本地项目安装与检查；公网从零下载路径未验证。新环境需要能获取这些版本的包源或由维护者准备匹配平台的可信缓存，不依赖仓库中的 .tools/.python/.uv-cache。
+这是版本约束集合，不是含平台 wheel/哈希的完整锁文件；没有锁定 OS、解释器或 pip。安装器按当前平台选包，不应拷贝 Mac 的 .venv、Python 可执行文件或 wheel 到服务器。Mac ARM64 的隔离环境已验证；**Ubuntu x86_64 / GPU 未验证**。第四轮复现时首次 pip 获取固定版本未成功，改用本机已有 uv 缓存离线安装后完成 pip 本地项目安装与检查；公网从零下载路径未验证。新环境需要能获取这些版本的包源或由维护者准备匹配平台的可信缓存，不依赖仓库中的 .tools/.python/.uv-cache。
 
 ### 不依赖真实 PDF 的端到端验证
 
@@ -68,7 +69,7 @@ CLI 退出码：0=完成/审计通过，1=文档或产物错误，2=参数/配�
 
 ## 4. 真实资料与产物
 
-两份已有业务测试报告为《26春夏抖音电商时尚消费趋势报告》（107 页）及《26SS春夏淘宝服饰白皮书》（128 页）。文件不包含在 GitHub 中，经授权获取后放在 data/input/；不要提交原文或生成图片。本轮没有处理原始报告。
+两份已有业务测试报告为《26春夏抖音电商时尚消费趋势报告》（107 页）及《26SS春夏淘宝服饰白皮书》（128 页）。文件不包含在 GitHub 中，经授权获取后放在 data/input/；不要提交原文或生成图片。第五轮只识别 107 页报告已有前三页 PNG 的独立副本，原始 PDF 和原处理目录未改变。
 
 ```bash
 multimodal-pdf-qa inspect 'data/input/26SS春夏淘宝服饰白皮书.pdf'
@@ -107,7 +108,48 @@ bbox 使用输入**渲染 PNG 像素** `[x0,y0,x1,y1]`，左上原点，x 向右
 
 未负责阶段必须在 ParserResult 中保持 not_run 且不返回该阶段数据，它不会覆盖已有页面状态。负责阶段必须明确 success/failed。success 需要内容或明确空原因，Runner 写入绑定 PNG 哈希的 provenance；failed 必须有错误且不得带部分新数据。异常/非法结果拒绝提交新内容，保存阶段失败及之前有效数据，旧数据仅供诊断。
 
-### 最小 Python 接口示例
+### Ollama 真实后端（已实现）
+
+前置条件：本机已有 Ollama 和 F16 模型，服务监听 127.0.0.1:11434。不要因导入/测试本项目而自动安装或下载模型。Adapter 构造时查询 `/api/version` 和 `/api/tags`，确认精确标签、完整 digest 和服务版本；找不到模型则失败，不执行 pull。生成使用 `/api/generate`、Base64 PNG、stream=false、raw=false，提示词为 `Text Recognition:`。API 及纳秒时长字段参见 [Ollama 文档](https://docs.ollama.com/api/generate)，提示词参照 [OpenBMB 模型说明](https://ollama.com/openbmb/minicpm-ocr1.0:f16)。
+
+本工作区已有 107 页报告时，可创建新的实验副本（目标已存在则 copytree 拒绝覆盖）：
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from shutil import copytree
+source = Path("data/processed/doc_ad04687d78935bea")
+target = Path("data/experiments/my_ollama_trial/doc_ad04687d78935bea")
+copytree(source, target)
+PY
+python scripts/run_ollama_ocr.py data/experiments/my_ollama_trial/doc_ad04687d78935bea --pages 1-3 --timeout 180
+```
+
+其他文档请使用自己的 prepare 输出目录。脚本只接受本 checkout 的 data/ 子目录和显式 --pages；会更新该目录的 JSONL，因此务必先做副本。也可直接程序调用：
+
+```python
+from pathlib import Path
+from multimodal_pdf_qa.backends.ollama_ocr import OllamaOCRAdapter
+from multimodal_pdf_qa.runner import run_parser
+
+adapter = OllamaOCRAdapter(timeout=180)
+report = run_parser(
+    Path("data/experiments/my_ollama_trial/doc_ad04687d78935bea"),
+    adapter, pages="1-3",
+)
+```
+
+`stages=("ocr",)`，成功文字原样写入 PageText，不输出 TextBlock/bbox，不动 Layout。默认 options 为 temperature=0、num_ctx=16384、num_predict=8192，keep_alive=5m；Python 可传 prompt/options，脚本提供 --num-ctx/--num-predict/--model/--timeout/--force。模型摘要、服务版本及全部关键配置组成稳定 name；同身份成功页复用缓存。一次运行期间不要更新模型标签；身份来自开始时的清单，不是逐 token 的执行证明。
+
+普通空字符串/空白不是空页证据，记失败；done=false、长度截断、错误模型名、非法指标/JSON 也失败。只有明确配置 empty_marker 且该标记在 prompt 中约定、完整响应与其精确匹配时，才保存 empty_reason，仍只是模型断言，需要人工确认。请求失败和超时分别记录 OllamaRequestError/OllamaTimeoutError；不自动重试。timeout 是 socket 等待限制，不是整次硬截止，也不取消服务端计算，超时后先检查服务状态再重试。
+
+请求禁用环境代理及 HTTP 重定向，仅允许 loopback HTTP 地址，不提供公网/收费 API 选项。结构化接口和页面 Schema 保持 v1.1 不变。标准库 HTTP 不新增 Python 依赖；模型计算由外部 Ollama 负责，不能把整条推理流程称为纯 CPU。
+
+脚本将 page_text 原文保存在 pages.jsonl，同时写入 `ollama_runs/<UTC时间>_<随机ID>.json`：含模型/配置身份、每次响应全文、字符数、API 纳秒指标、客户端耗时、HTTP 结果及最终持久化状态。stdout 不含全文。程序调用者可读取 adapter.attempts/identity，但这些可能含私有文字/提示词，不要直接提交 Git。日志是独立侧文件，不与 JSONL 构成事务；预检/连接失败可产生失败日志，但不会修改页面索引；KeyboardInterrupt、进程强杀或磁盘故障时应先查看实际检查点。
+
+第五轮实测：Ollama 0.40.18、F16，前三页 35/991/943 字符，客户端 9.25/16.97/16.85 秒，总体 43.38 秒。三页无结构化 bbox，Layout not_run；原文未上传，质量由用户确认，详见 [实验报告](progress/iteration_05.md)。单次三页结果不证明全报告性能或 OCR 准确率，未测量峰值统一内存。
+
+### 其他后端的最小接口示例
 
 下面只展示如何包装**调用者已经实现的真实文字推理函数**，不是 MiniCPM-OCR 实现，也没有内置 Mock：
 
@@ -176,13 +218,13 @@ def read_outputs(document_dir: Path):
 
 ## 6. 接手后的前三项任务
 
-A. 经授权在 PolyU RTX 3080 环境验证真实 OCR/文档 MLLM，优先验证 MiniCPM-OCR 的最小可用输入/输出；记录模型版本、依赖、缩放、耗时、显存和空结果行为，再包装 Adapter。
+A. 将已完成的 Mac Ollama 接入作为参考，在授权 PolyU RTX 3080 环境重新验证 MiniCPM-OCR/其他文档模型；核对实际权重 digest、量化、Ollama/其他推理引擎版本、请求语义、显存、耗时和空结果行为，不能沿用 Mac 的性能结论。
 
 B. 验证 PP-DocLayoutV3 等布局后端，将真实类别、坐标、阅读顺序和来源转换为当前契约；先写输出转换测试，再接 Runner。不要把标题/表格等都写成 ImageRegion。
 
 C. 用少量代表页人工核对文字、图像/布局区域、类别和证据来源，检查错误恢复及跨阶段引用，再推进核心 MLLM 线索提取和外部数据库检索。
 
-**MiniCPM-OCR 和 PP-DocLayoutV3 的部署、模型版本、显存适配及准确率均未验证**，不能保证指定模型在 3080 单卡上满足需求。
+**MiniCPM-OCR 的指定 Ollama F16 版本已在 Mac 完成三页真实识别；其准确率和 GPU 迁移仍未验证。PP-DocLayoutV3 的部署、版本、显存与准确率全部未验证**，不能保证指定模型在 3080 单卡上满足需求。
 
 ## 7. 已知限制与提交边界
 
@@ -191,6 +233,6 @@ C. 用少量代表页人工核对文字、图像/布局区域、类别和证据�
 - 页面 v1.1 兼容原 v1.0 空/not_run 页；手工解析过但无来源的旧数据只能读取并警告，Runner 拒绝自动迁移。先备份，再显式 force-prepare 重建或制定人工迁移流程。
 - 非默认 UserUnit、越界 CropBox 等特殊几何明确不支持；旧未请求页的矩阵不自动修复。audit 不能替代独立几何真值测试。
 - R5 每页实际渲染器版本溯源待完善。R6 本轮已有版本约束及 Mac 隔离验证，完整哈希锁、Python 其他版本及 Ubuntu x86_64/GPU 仍未验证。
-- 无真实 OCR/MLLM/布局、数据库、RAG、Agent 或 Web UI 实现；后端测试成功不等于业务准确率通过。
+- 真实 OCR 已有 Ollama 后端；完整图文 MLLM 理解、布局、数据库、RAG、Agent 和 Web UI 仍未实现。后端测试成功不等于业务准确率通过。
 
 只提交代码、测试、公开示例、约束文件、文档和 .gitkeep。原始报告、生成数据、环境、缓存、模型权重、.env/API Key/服务器凭据均不提交。每次提交前查看 `git status --short` 与实际暂存差异；.gitignore 不能替代敏感内容检查。本轮未 commit/push，后续通过现有 Private Repository 审阅。
