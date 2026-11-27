@@ -46,6 +46,16 @@ multimodal-pdf-qa audit data/processed-demo
 
 预期三页渲染和审计通过，OCR/Layout 仍 not_run。重复 prepare 跳过成功页；demo.pdf 已存在时生成脚本会拒绝覆盖，直接复用即可。也支持 `python -m multimodal_pdf_qa`。
 
+## 一键 PDF → PNG → OCR → JSON
+
+已提供 `scripts/pdf_to_ocr_json.py`，输入单份 PDF 即可自动渲染 PNG、调用本地 MiniCPM-OCR 并导出 `ocr_results.json`。请先确保 Ollama 服务及 F16 模型已安装，项目依赖已就绪；建议先处理 1–3 页：
+
+```bash
+.venv/bin/python scripts/pdf_to_ocr_json.py "data/input/report.pdf" --pages 1-3 --show-text
+```
+
+默认输出到被 Git 忽略的 `data/ocr_pipeline/doc_<PDF哈希前16位>/`，保留 `pages.jsonl`、`audit.json`、`ollama_runs/`；不传 `--pages` 会处理全部页面。重复运行可复用成功页，`--force-ocr` 才强制重识别。详见 [一键 OCR 使用说明](docs/one_command_ocr.md)。
+
 ## 输入与输出
 
 真实报告放在 data/input/，仓库不附带。两份已有测试报告分别为《26春夏抖音电商时尚消费趋势报告》（107 页）及《26SS春夏淘宝服饰白皮书》（128 页）；先用少量页验证：
@@ -96,7 +106,7 @@ multimodal-pdf-qa audit data/experiments/iteration_05_ollama_f16/doc_ad04687d789
 
 ## 测试、交接与版本管理
 
-第五轮以已提交的 **3c51559** 为基线，保留原 222 项测试并增加 Ollama Mock HTTP 回归；当前 **265 passed，5 条既有 SWIG 警告**。真实实验前完整测试 264 项通过；实验后补充服务不可用的脚本回归测试。证据见 [iteration_05.md](docs/progress/iteration_05.md)，历史报告不回写。本轮尚未 commit/push。
+第五轮以已提交的 **3c51559** 为基线，保留原 222 项测试并增加 Ollama Mock HTTP 回归；当前 **265 passed，5 条既有 SWIG 警告**。真实实验前完整测试 264 项通过；实验后补充服务不可用的脚本回归测试。证据见 [iteration_05.md](docs/progress/iteration_05.md)，历史报告不回写。第五轮已提交为 `dda6c34`；一键 OCR 脚本另有后续提交。
 
 下一步由师兄在 PolyU 环境重新验证 OCR 部署/版本/显存和性能，接入 PP-DocLayoutV3，并在少量授权页面人工检查质量。Mac 的三页实验不能替代 Ubuntu/GPU 或业务准确率验收；后续路线见 [Roadmap](docs/roadmap.md)。
 

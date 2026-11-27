@@ -1,6 +1,6 @@
 # 工程交接：从 Clone 到接入真实后端
 
-更新：2026-11-27。第四轮已提交基线为 `3c51559`；第五轮新增 Ollama OCR 和三页真实实验，目前未 commit/push，详见 [iteration_05.md](progress/iteration_05.md)。
+更新：2026-11-27。第四轮已提交基线为 `3c51559`；第五轮新增 Ollama OCR 和三页真实实验，已提交为 `dda6c34`，详见 [iteration_05.md](progress/iteration_05.md)。
 
 ## 1. 项目目标与边界
 
@@ -48,7 +48,7 @@ python -m pip check
 python -m pytest -q
 ```
 
-基础交接文件已在 `3c51559` 中。使用真实 Ollama 后端前，需用户确认上传第五轮并更新仓库。Python 3.12+ 可替换解释器命令，但未实测这些版本。Ubuntu 若缺 venv 模块，先由环境维护者安装对应 Python 的 venv 支持；核心工程不需要 CUDA。
+基础交接文件已在 `3c51559` 中，第五轮真实 Ollama 后端已提交为 `dda6c34`，可直接依照当前仓库运行。Python 3.12+ 可替换解释器命令，但未实测这些版本。Ubuntu 若缺 venv 模块，先由环境维护者安装对应 Python 的 venv 支持；核心工程不需要 CUDA。
 
 [constraints/verified.txt](../constraints/verified.txt) 固定已验证组合：PyMuPDF 1.28.2、pytest 9.2.0、iniconfig 2.3.1、packaging 26.4、pluggy 1.7.0、Pygments 2.21.0、构建后端 setuptools 84.2.1。先安装固定 setuptools，再以 `--no-build-isolation` 构建本项目，避免隔离构建另取未约束版本。`pyproject.toml` 保留通用安装范围；范围内每个版本都通过测试并不是本项目的承诺。
 
@@ -107,6 +107,16 @@ data/processed/doc_<PDF哈希前16位>/
 bbox 使用输入**渲染 PNG 像素** `[x0,y0,x1,y1]`，左上原点，x 向右、y 向下，要求 `0≤x0<x1≤image_width`、`0≤y0<y1≤image_height`。后端必须自行逆转缩放/letterbox/裁剪，转成 Python 有限 int/float，不能填 NaN/Infinity 或归一化坐标。置信度 null 或 [0,1]，阅读顺序 null 或正整数，区域 ID 跨类型单页唯一。详细字段见 [schema.md](schema.md)。
 
 未负责阶段必须在 ParserResult 中保持 not_run 且不返回该阶段数据，它不会覆盖已有页面状态。负责阶段必须明确 success/failed。success 需要内容或明确空原因，Runner 写入绑定 PNG 哈希的 provenance；failed 必须有错误且不得带部分新数据。异常/非法结果拒绝提交新内容，保存阶段失败及之前有效数据，旧数据仅供诊断。
+
+### 一键 PDF → PNG → OCR → JSON
+
+最新统一入口：`scripts/pdf_to_ocr_json.py`。输入一份 PDF 自动调用 `prepare_pdf`、本地 Ollama OCR、Runner 和 JSON 导出，默认写入独立 `data/ocr_pipeline/`。请先确认 Python 项目依赖、本地 Ollama 服务和 MiniCPM-OCR F16 已就绪：
+
+```bash
+.venv/bin/python scripts/pdf_to_ocr_json.py "data/input/report.pdf" --pages 1-3 --show-text
+```
+
+生成 `pages/page_XXXX.png`、`pages.jsonl`、`ocr_results.json`、`audit.json` 及私有 `ollama_runs/`。默认不带 `--pages` 时处理全部 PDF 页；`--show-text` 会将原文输出到终端，注意日志隐私。详见 [一键 OCR 使用说明](one_command_ocr.md)，后文的 `scripts/run_ollama_ocr.py` 仍可单独用于已有预处理目录。
 
 ### Ollama 真实后端（已实现）
 
@@ -235,4 +245,4 @@ C. 用少量代表页人工核对文字、图像/布局区域、类别和证据�
 - R5 每页实际渲染器版本溯源待完善。R6 本轮已有版本约束及 Mac 隔离验证，完整哈希锁、Python 其他版本及 Ubuntu x86_64/GPU 仍未验证。
 - 真实 OCR 已有 Ollama 后端；完整图文 MLLM 理解、布局、数据库、RAG、Agent 和 Web UI 仍未实现。后端测试成功不等于业务准确率通过。
 
-只提交代码、测试、公开示例、约束文件、文档和 .gitkeep。原始报告、生成数据、环境、缓存、模型权重、.env/API Key/服务器凭据均不提交。每次提交前查看 `git status --short` 与实际暂存差异；.gitignore 不能替代敏感内容检查。本轮未 commit/push，后续通过现有 Private Repository 审阅。
+只提交代码、测试、公开示例、约束文件、文档和 .gitkeep。原始报告、生成数据、环境、缓存、模型权重、.env/API Key/服务器凭据均不提交。每次提交前查看 `git status --short` 与实际暂存差异；.gitignore 不能替代敏感内容检查。第五轮及一键 OCR 入口均已提交至现有 Private Repository，后续修改请继续审阅与验证。
